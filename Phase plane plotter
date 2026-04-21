@@ -1,0 +1,93 @@
+F=0.18
+# ── Parameters ────────────────────────────────────────────────────────────────
+eta   = 0
+mu    = 0
+VA    = 0.898048
+TA    = 5.554
+VN    = 0.045296187
+TN    = 0.175
+VL    = 0.0566555816
+TL    = 3.018
+S0    = 35
+FN = 0.0166
+alpha = 1.7e-4
+FL = 0.0322
+beta  = 28e-3
+k     = 2.1e4
+eps   = 1e-10
+w     = 0.6
+
+def uniform_random():
+    return 32/35 + np.random.rand() * 6/35
+
+def SA(L, N):
+    return (1 - VL*L - VN*N) / VA
+
+def qL(L, N):
+    sa = SA(L, N)
+    return -k*(alpha*(TN + mu*(TL - TN) - TA) - beta*(L - sa))
+
+def qN(L, N):
+    sa = SA(L, N)
+    return -k*(alpha*(TN - TA) - beta*(N - sa))
+
+def box_model(y, t, F):
+
+    L, N = y
+    sa = SA(L, N)
+    ql = qL(L, N)
+    qn = qN(L, N)
+    dLdt = (-(F/k + FN / k + eta*(FL / k - FN / k)) + np.sqrt(ql*ql/(k*k) + eps*eps)*(sa - L)) / VL
+    dNdt = (-(F/k + FN/ k)                  + np.sqrt(qn*qn / (k*k) + eps*eps)*(sa - N)) / VN
+
+    return [dLdt, dNdt]
+
+
+# time grid
+t = np.linspace(0, 500, 500000)
+
+# F range
+F_values = np.linspace(-0.05, 0.2, 200)
+
+# number of random initial conditions for each F
+n_IC = 100
+
+# create side-by-side plots
+fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18,5))
+
+for i in range(n_IC):
+  # random initial condition
+  y0 = [uniform_random(), uniform_random()]
+
+  sol = odeint(box_model, y0, t, args=(F,))
+
+  L_final = sol[-1,0]
+  N_final = sol[-1,1]
+
+        # plot final equilibria
+  ax1.plot(t, sol[:,0])
+  ax2.plot(t, sol[:,1])
+  ax3.plot(sol[:,0], sol[:,1])
+  ax1.plot(t[-1], L_final, 'x', color='black') # Corrected: plot the final point
+  ax2.plot(t[-1], N_final, 'x', color='black') # Corrected: plot the final point
+  ax3.plot(L_final, N_final, 'x', color='black')
+
+# labels and titles
+ax1.set_xlabel("t")
+ax1.set_ybound(0.96,1.02)
+ax1.set_ylabel("$s_L$")
+ax1.set_title(" $s_L$")
+
+ax2.set_xlabel("t")
+ax2.set_ybound(0.96,1.02)
+ax2.set_ylabel("$s_N$")
+ax2.set_title("$s_N$")
+
+ax3.set_xlabel("$s_L$")
+ax3.set_ylabel("$s_N$")
+ax3.set_xbound(0.96,1.02)
+ax3.set_ybound(0.96,1.02)
+ax3.set_title("Phase plane F = -0.02")
+
+plt.tight_layout()
+plt.show()

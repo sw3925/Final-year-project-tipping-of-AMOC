@@ -1,0 +1,237 @@
+# ── Parameters ────────────────────────────────────────────────────────────────
+M       = 1          # number of stochastic realisations
+T_final = 8000          # final simulation time
+delta_t = 1e-3         # Euler–Maruyama timestep
+sigma = 0.0001
+
+eta   = 0
+mu    = 0
+VA    = 0.898048
+TA    = 5.554
+VN    = 0.045296187
+TN    = 0.175
+VL    = 0.0566555816
+TL    = 3.018
+S0    = 35
+FN = 0.0166
+alpha = 1.7e-4
+FL = 0.0322
+beta  = 28e-3
+k     = 2.1e4
+eps   = 1e-10
+w     = 0.6
+
+# ── Algebraic helper functions ─────────────────────────────────────────────────
+def SA(L, N):
+    return (1 - VL*L - VN*N) / VA
+
+def qL(L, N):
+    sa = SA(L, N)
+    return -k*(alpha*(TN + mu*(TL - TN) - TA) - beta*(L - sa))
+
+def qN(L, N):
+    sa = SA(L, N)
+    return -k*(alpha*(TN - TA) - beta*(N - sa))
+
+# ── ODE right-hand side ───────────────────────────────────────────────────────
+def rhs(t, y, F_val):
+    L, N = y
+    sa = SA(L, N)
+    ql = qL(L, N)
+    qn = qN(L, N)
+    dL = (-(F_val/k + FN / k + eta*(FL / k - FN / k)) + np.sqrt(ql*ql/(k*k) + eps*eps)*(sa - L)) / VL
+    dN = (-(F_val/k + FN/ k)                  + np.sqrt(qn*qn / (k*k) + eps*eps)*(sa - N)) / VN
+    return [dL, dN]
+
+
+# ── Time vector & storage ─────────────────────────────────────────────────────
+time_vec      = np.arange(0, T_final + delta_t, delta_t)
+num_rec_steps = int(T_final / delta_t)
+
+rec_L = np.zeros((num_rec_steps + 1, M))
+rec_N = np.zeros((num_rec_steps + 1, M))
+rec_F = np.zeros((num_rec_steps + 1, M))
+
+# ── Initial conditions ─────────────────────────────────────────────────────────
+eps2 = 1e-5
+L_init = 0.997
+N_init = 0.997
+F_init = 0.1
+
+# ── ODE system ────────────────────────────────────────────────────────────────
+# State vector: [L, N, F2, G]
+# F = F1
+
+
+rec_L[0, :] = L_init
+rec_N[0, :] = N_init
+rec_F[0, :] = F_init
+
+# ── Euler–Maruyama integration ────────────────────────────────────────────────
+sqrt_dt = np.sqrt(delta_t)
+rng     = np.random.default_rng()          # reproducible: add seed= if needed
+
+for i in range(num_rec_steps):
+    sL = rec_L[i, :]
+    sN = rec_N[i, :]
+    F = rec_F[i, :]
+
+    sA = (1.0 - VL * sL - VN * sN) / VA
+
+    ql = -k*(alpha*(TN + mu*(TL - TN) - TA) - beta*(sL - sA))
+    qn = -k*(alpha*(TN - TA) - beta*(sN - sA))
+
+    dL  = (-(F/k + FN / k + eta*(FL / k - FN / k)) + np.sqrt(ql*ql/(k*k) + eps*eps)*(sA - sL)) / VL
+    dN  = (-(F/k + FN/ k)                  + np.sqrt(qn*qn / (k*k) + eps*eps)*(sA - sN)) / VN
+
+    rec_L[i + 1, :] = sL + delta_t * dL + sqrt_dt * sigma * rng.standard_normal(M)
+    rec_N[i + 1, :] = sN + delta_t * dN + sqrt_dt * sigma * rng.standard_normal(M)
+    rec_F[i + 1, :] = rec_F[i, :] + delta_t * eps2
+
+# ── Stochastic means ──────────────────────────────────────────────────────────
+mean_L = rec_L.mean(axis=1)
+mean_N = rec_N.mean(axis=1)
+
+# ── Integrate ─────────────────────────────────────────────────────────────────
+
+
+# ── Stability via numerical Jacobian ──────────────────────────────────────────
+def is_stable(y_ss, F_val, h=1e-7):
+    J = np.zeros((2, 2))
+    for i in range(2):
+        yf = y_ss.copy(); yf[i] += h
+        yb = y_ss.copy(); yb[i] -= h
+        J[:, i] = (np.array(rhs(0, yf, F_val)) - np.array(rhs(0, yb, F_val))) / (2*h)
+    return np.all(np.real(np.linalg.eigvals(J)) < 0)
+
+# ── Steady-state finder ───────────────────────────────────────────────────────
+def find_all_steady_states(F_val, n_guesses=15):
+    found = []
+    for L_g in np.linspace(0.01, 1.2, n_guesses):
+        for N_g in np.linspace(0.01, 1.2, n_guesses):
+            try:
+                root, info, ier, _ = fsolve(
+                    lambda y: rhs(0, y, F_val), [L_g, N_g], full_output=True
+                )
+                if ier != 1:
+                    continue
+                L_ss, N_ss = root
+                if not (0.0 <= L_ss <= 1.5 and 0.0 <= N_ss <= 1.5):
+                    continue
+                if np.max(np.abs(rhs(0, root, F_val))) > 1e-10:
+                    continue
+                # de-duplicate
+                if any(abs(Ls - L_ss) < 1e-5 and abs(Ns - N_ss) < 1e-5
+                       for Ls, Ns, _ in found):
+                    continue
+                stable = is_stable(root, F_val)
+                found.append((L_ss, N_ss, stable))
+            except Exception:
+                pass
+    return found
+
+# ── Sweep ─────────────────────────────────────────────────────────────────────
+# ── Sweep with continuation ───────────────────────────────────────────────────
+F_values = np.linspace(-0.05, 0.2, 1000)
+
+stable_F, stable_N     = [], []
+unstable_F, unstable_N = [], []
+stable_FL, stable_L     = [], []
+unstable_FL, unstable_L = [], []
+stable_FQ,  stable_Q  = [], []
+unstable_FQ, unstable_Q = [], []
+
+# Initial seeds at first F value
+prev_roots = [[L_g, N_g] for L_g in np.linspace(0.01, 1.2, 15)
+                          for N_g in np.linspace(0.01, 1.2, 15)]
+
+print("Sweeping F ...")
+for i, F_val in enumerate(F_values):
+    if i % 100 == 0:
+        print(f"  {i}/{len(F_values)}  F = {F_val:.3e}")
+
+    found = []
+    # Try continuing from previous steady states first, then fall back to grid
+    seeds = prev_roots + [[L_g, N_g] for L_g in np.linspace(0.01, 1.2, 8)
+                                      for N_g in np.linspace(0.01, 1.2, 8)]
+    for seed in seeds:
+        try:
+            root, info, ier, _ = fsolve(
+                lambda y: rhs(0, y, F_val), seed, full_output=True
+            )
+            if ier != 1:
+                continue
+            L_ss, N_ss = root
+            if not (0.0 <= L_ss <= 1.5 and 0.0 <= N_ss <= 1.5):
+                continue
+            if np.max(np.abs(rhs(0, root, F_val))) > 1e-10:
+                continue
+            if any(abs(Ls - L_ss) < 1e-5 and abs(Ns - N_ss) < 1e-5
+                   for Ls, Ns, _ in found):
+                continue
+            stable = is_stable(root, F_val)
+            found.append((L_ss, N_ss, stable))
+        except Exception:
+            pass
+
+    # Carry current steady states forward as seeds for next step
+    prev_roots = [[L_ss, N_ss] for L_ss, N_ss, _ in found]
+
+    for L_ss, N_ss, stable in found:
+        Q_ss = qN(L_ss, N_ss) + qL(L_ss, N_ss)
+        if stable:
+            stable_F.append(F_val);   stable_N.append(N_ss)
+            stable_FL.append(F_val);  stable_L.append(L_ss)
+            stable_FQ.append(F_val);   stable_Q.append(Q_ss)
+        else:
+            unstable_F.append(F_val); unstable_N.append(N_ss)
+            unstable_FL.append(F_val); unstable_L.append(L_ss)
+            unstable_FQ.append(F_val); unstable_Q.append(Q_ss)
+
+# ── Plotting ──────────────────────────────────────────────────────────────────
+n_show = 1             # number of individual realisations to display
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+
+# ── N vs F ────────────────────────────────────────────────────────────────────
+ax1.scatter(stable_F,   stable_N,   s=4, color='steelblue', linewidth=1.4, label='Stable',     rasterized=True)
+ax1.scatter(unstable_F, unstable_N, s=1, color='tomato',  linewidth=1.4,  label='Unstable',   rasterized=True)
+ax1.plot(rec_F[:, :n_show], rec_N[:, :n_show], color=(0.7, 0.7, 0.7), label="_nolegend_")
+ax1.set_xlabel(r'$F$', fontsize=13)
+ax1.set_ylabel(r'$s_N^*$', fontsize=13)
+ax1.set_title(r'Steady states of $s_N$ vs $F$', fontsize=14)
+ax1.legend(fontsize=11, markerscale=2)
+ax1.set_xlim(-0.05, 0.2)
+ax1.grid(True, alpha=0.3)
+
+
+
+# ── L vs F ────────────────────────────────────────────────────────────────────
+ax2.scatter(stable_FL,   stable_L,   s=4, color='steelblue', label='Stable',     rasterized=True)
+ax2.scatter(unstable_FL, unstable_L, s=1, color='tomato',  label='Unstable',   rasterized=True)
+ax2.plot(rec_F[:, :n_show], rec_L[:, :n_show], color=(0.7, 0.7, 0.7), label="_nolegend_")
+ax2.set_xlabel(r'$F$', fontsize=13)
+ax2.set_ylabel(r'$s_L^*$', fontsize=13)
+ax2.set_title(r'Steady states of $s_L$ vs $F$', fontsize=14)
+ax2.legend(fontsize=11, markerscale=2)
+ax2.set_xlim(-0.05, 0.2)
+ax2.grid(True, alpha=0.3)
+
+Q_traj = np.array([qN(rec_L[i, 0], rec_N[i, 0]) + qL(rec_L[i, 0], rec_N[i, 0])
+                   for i in range(len(rec_L))])
+
+fig, ax = plt.subplots(figsize=(8, 5))
+
+ax.scatter(stable_FQ,   stable_Q,   s=4, color='steelblue', label='Stable',   rasterized=True)
+ax.scatter(unstable_FQ, unstable_Q, s=1, color='tomato',    label='Unstable', rasterized=True)
+ax.plot(rec_F[:, 0], Q_traj, color=(0.7, 0.7, 0.7), label='Trajectory')
+ax.set_xlabel(r'$F$', fontsize=13)
+ax.set_ylabel(r'$Q^* = q_L^* + q_N^*$', fontsize=13)
+ax.set_title(r'Steady states of $Q = q_L + q_N$ vs $F$', fontsize=14)
+ax.legend(fontsize=11, markerscale=2)
+ax.set_xlim(-0.05, 0.2)
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('bifurcation_diagram_Q.png', dpi=150)
+plt.show()
